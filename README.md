@@ -1,82 +1,131 @@
-# 🔄 Real-Time Customer Data Streaming with Spring WebFlux
+# Implementasi Event Listener di Spring Boot (Asynchronous Event-Driven)
 
-This project demonstrates how to build a real-time data streaming service using **Spring WebFlux** and **Server-Sent Events (SSE)**. It streams customer data from a reactive H2 database to clients whenever changes occur.
-
----
-
-## 🚀 Features
-
-- ✅ Reactive, non-blocking data stream using `Flux`
-- ✅ Real-time push updates from the database to the frontend
-- ✅ One-way server-to-client communication via Server-Sent Events (SSE)
-- ✅ In-memory **H2 Database** with **R2DBC** for fully reactive backend
-- ✅ Periodic polling for new/unsent customer records with automatic flagging
+Dokumentasi ini menjelaskan cara kerja, pembuatan Controller, dan Service untuk memproses data transaksi menggunakan mekanisme **ApplicationEventPublisher** dan **@EventListener** di Spring Boot.
 
 ---
 
-## 🧩 Tech Stack
+## 1. Apa itu Event Listener?
 
-- **Spring Boot** `WebFlux`
-- **Project Reactor**
-- **Server-Sent Events (SSE)`
-- **R2DBC** (Reactive Relational Database Connectivity)
-- **H2 Database** (In-memory for testing and development)
+**Event Listener** adalah pola desain (*design pattern*) di mana sebuah komponen (Listener) menunggu dan merespons sebuah kejadian (*event*) yang dipicu oleh komponen lain (Publisher).
 
----
-
-## 📡 How It Works
-
-1. The backend polls the database every 2 seconds for new customer entries where `flag_sent = 0`.
-2. New entries are emitted through a reactive `Flux` using a `Sinks.Many` publisher.
-3. The `flag_sent` is immediately updated to prevent resending the same data.
-4. Clients connected to `/stream/customers` receive real-time updates via SSE.
+Di Spring Boot, mekanisme ini memisahkan proses penerimaan data dari proses pengolahan data (*decoupling*). Keuntungan utamanya meliputi:
+*   **Non-blocking**: Controller bisa langsung mengembalikan respons `202 Accepted` tanpa menunggu Service selesai memproses data.
+*   **Maintanable**: Kode menjadi lebih bersih karena logika bisnis terpisah dari logika HTTP Controller.
 
 ---
 
-## 📂 Architecture
+## 2. Controller: Menerima Request dan Memicu Event
 
-```text
-+---------------------+       +-------------------------+       +---------------------+
-|      H2 Database     | <---> |  NotificationListener   | <---> |  /stream/customers  |
-| (new customer rows) |       |   (emits new data)      |       |  (SSE endpoint)     |
-+---------------------+       +-------------------------+       +---------------------+
-                                        |                              |
-                                        v                              v
-                               Reactively query DB           Client receives stream
-                               every 2 seconds               of Customer JSON objects
+Controller di bawah ini berfungsi sebagai **Publisher**. Saat menerima data transaksi via HTTP POST, Controller akan membungkus data tersebut ke dalam objek `DataMapper` dan memublikasikannya sebagai sebuah *event*.
+
+```java
+@RestController
+@RequestMapping("/api/v1/transaction")
+public class TransactionController {
+
+    @Autowired
+    private ApplicationEventPublisher publisher;
+
+    @PostMapping(path = "/submit")
+    public Mono<ResponseEntity<ResponseResult<String>>> createTransaction(@RequestBody List<TransactionDto> transactionDtoList) {
+        // Memicu event dan mengirim data transaksi ke listener
+        publisher.publishEvent(new DataMapper<>(transactionDtoList));
+        
+        // Langsung mengembalikan respons tanpa menunggu proses di service selesai
+        return Mono.just(ResponseEntity.accepted().body(
+            new ResponseResult<>(HttpStatus.ACCEPTED.toString(), HttpStatus.ACCEPTED.name(), "Submitting data successful")
+        ));
+    }
+}
 ```
 
+---
 
-## ▶️ How to Run the Application
-✅ Prerequisites
-- *Java 17 or higher*
-- *Maven or Gradle*
-- *Internet connection (to download dependencies)*
+## 3. Service: Mengonsumsi dan Memproses Data
 
-🧪 Run with Maven
+Service di bawah ini bertindak sebagai **Listener**. Dengan anotasi `@EventListener`, metode `submit` akan otomatis berjalan setiap kali ada *event* baru dengan tipe data `DataMapper<List<TransactionDto>>`.
+
+```java
+@Service
+public class TransactionService {
+
+    private static final Logger logger = LoggerFactory.getLogger(TransactionService.class);
+
+    @EventListener
+    public void submit(DataMapper<List<TransactionDto>> dataMapper) {
+        // Mengambil payload data transaksi dari event
+        List<TransactionDto> transactionDtoList = dataMapper.getPayload();
+        AtomicInteger i = new AtomicInteger(1);
+        
+        // Memproses/mencetak setiap transaksi ke log
+        transactionDtoList.stream().forEach(trx -> {
+            logger.info("Trx {}: {}", i.getAndIncrement(), trx);
+        });
+    }
+}
 ```
-./mvnw spring-boot:run
+---
 
-```
-🧪 Run with Gradle
-```
-./gradlew bootRun
+## 4. Struktur DataMapper (Event Wrapper)
 
-```
-🧪 Or Build and Run the JAR
-```
-./mvnw clean package
-java -jar target/your-app-name.jar
-```
-Replace your-app-name.jar with the actual JAR name created in the target folder.
+Untuk mengirimkan data dari Controller ke Service, kita menggunakan sebuah kelas *wrapper* generic bernama `DataMapper`. Kelas ini berfungsi membawa *payload* data yang akan ditransmisikan melalui event.
 
-🌐 Accessing the Stream
-Once the application is running:
-- Open your browser or an HTTP client like Postman, and access:
-  ```
-  http://localhost:8080/stream/customers
+```java
+public class DataMapper<T> {
+    private final T payload;
 
-  ```
-- You will see a continuous SSE (Server-Sent Events) stream of customer data updates.
+    public DataMapper(T payload) {
+        this.payload = payload;
+    }
 
+    public T getPayload() {
+        return payload;
+    }
+}
+```
+
+---
+
+## 5. Mengaktifkan Proses Asynchronous (@Async)
+
+Secara bawaan (*default*), mekanisme `ApplicationEventPublisher` di Spring Boot berjalan secara sinkron (*synchronous*). Artinya, Controller tetap akan menunggu proses di Service selesai sebelum mengirim respons HTTP.
+
+Agar proses berjalan secara **Asynchronous (Non-blocking)** sepenuhnya, kita perlu melakukan dua langkah berikut:
+
+### Langkah 1: Aktifkan Async di Kelas Konfigurasi
+Tambahkan anotasi `@EnableAsync` pada kelas utama (*Main Class*) atau kelas konfigurasi Spring Boot Anda.
+
+```java
+@SpringBootApplication
+@EnableAsync // <--- Mengaktifkan fitur asynchronous
+public class Application {
+    public static void main(String[] args) {
+        SpringApplication.run(Application.class, args);
+    }
+}
+```
+
+### Langkah 2: Tambahkan @Async pada Event Listener
+Tambahkan anotasi `@Async` tepat di atas anotasi `@EventListener` pada komponen Service Anda.
+
+```java
+@Service
+public class TransactionService {
+
+    private static final Logger logger = LoggerFactory.getLogger(TransactionService.class);
+
+    @Async // <--- Membuat metode ini berjalan di thread terpisah
+    @EventListener
+    public void submit(DataMapper<List<TransactionDto>> dataMapper) {
+        List<TransactionDto> transactionDtoList = dataMapper.getPayload();
+        AtomicInteger i = new AtomicInteger(1);
+        
+        transactionDtoList.stream().forEach(trx -> {
+            logger.info("Trx {}: {}", i.getAndIncrement(), trx);
+        });
+    }
+}
+```
+
+Dengan konfigurasi di atas, saat `publisher.publishEvent()` dipanggil, Spring akan langsung mengeksekusi metode `submit` di *thread* yang berbeda. Controller bisa langsung mengembalikan respons `202 Accepted` ke pengguna tanpa jeda.
 
