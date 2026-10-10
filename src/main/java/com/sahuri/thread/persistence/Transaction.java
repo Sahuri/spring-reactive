@@ -1,5 +1,6 @@
 package com.sahuri.thread.persistence;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Data;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.annotation.Transient;
@@ -40,6 +41,7 @@ public class Transaction implements Persistable<String> {
     private boolean isNew = true;
 
     @Override
+    @JsonIgnore
     public boolean isNew() {
         return isNew;
     }
