@@ -13,6 +13,7 @@ This is the reactive counterpart of the `SpringEventListener` sample: same intak
 | Reactive HTTP layer | `spring-boot-starter-webflux` on **Netty**; the controller returns `Mono<ResponseEntity<...>>` and never blocks the request thread |
 | Decoupling intake from processing | `ApplicationEventPublisher` publishes a `DataMapper<T>` event; `@Async @EventListener` consumes it on a separate task thread |
 | Reactive persistence | `ReactiveCrudRepository<Transaction, String>` over **R2DBC H2**, written with `saveAll(...)` from the listener |
+| Streaming read | `GET /stream` returns `Flux<ServerSentEvent<Transaction>>` as `text/event-stream` — chunked, paced, cancellable by the client |
 | Application-assigned keys | `Transaction implements Persistable<String>` — with a UUID primary key Spring Data R2DBC would otherwise emit an `UPDATE` against a row that does not exist yet |
 | Immutable payloads | Java `record`s — `TransactionDto`, `ResponseResult<T>` |
 | Profile-based config | `dev` profile → H2 R2DBC, HTTP port `9091` |
@@ -96,6 +97,28 @@ INFO --- [         task-1] c.s.thread.service.TransactionService : Persisted trx
 
 Watch the thread names: HTTP is served by Netty's event loop, while the work runs on `task-1` from the async executor. Request acceptance and request processing are decoupled, which is what keeps intake latency flat while a burst is being written.
 
+### `GET /api/v1/transaction/stream`
+
+Server-Sent Events stream of the stored transactions. The response is `text/event-stream` with `Transfer-Encoding: chunked`, paced at 50 ms per element.
+
+```bash
+curl -N -H "Accept: text/event-stream" http://localhost:9091/api/v1/transaction/stream
+```
+
+Real frames from a run right after the `POST` above:
+
+```
+id:0473206f-997b-4b81-91b6-ed8c4ad06b7f
+event:transaction
+data:{"id":"0473206f-997b-4b81-91b6-ed8c4ad06b7f","orderNumber":"SSE-001","item":"Kopi","qty":2,"amount":45000.00,"status":true,"updatedDate":"...","createdDate":"..."}
+
+id:...
+event:transaction
+data:{...}
+```
+
+Because the handler returns a `Flux`, the client sets the pace: a consumer that reads slowly simply receives the frames more slowly instead of the server buffering rows, and dropping the connection cancels the flow.
+
 ## How it works
 
 1. **Controller (publisher)** — the request body is wrapped in a generic `DataMapper<T>` event and published; the method returns `Mono.just(202 Accepted)` without waiting.
@@ -105,12 +128,12 @@ Watch the thread names: HTTP is served by Netty's event loop, while the work run
 
 ## Verification
 
-- `mvn test` — `TransactionIntakeTest` asserts the `202 ACCEPTED` response and then that the rows really landed (`count == 2`) by reading them back through the R2DBC repository.
-- Live run — a `POST` with 3 transactions returned `202` in ~0.4s and all 3 were persisted on thread `task-1`, with no error lines in the log.
+- `mvn test` — `TransactionIntakeTest` has two cases: the intake test asserts the `202 ACCEPTED` response and then that the rows really landed (read back through the R2DBC repository); the stream test reads the SSE endpoint off the wire and asserts the `event:transaction` frames carry the persisted order numbers.
+- Live run — a `POST` with 3 transactions returned `202` in ~0.4s and all 3 were persisted on thread `task-1`, and `curl -N` on the stream returned real `event:transaction` frames with no error lines in the log.
 
 ## Still open
 
-- No read endpoint yet. The natural next step is a streaming read — e.g. `GET /api/v1/transaction/stream` returning `Flux<Transaction>` as `text/event-stream` — to demonstrate backpressure and a fully reactive round trip.
+- The stream re-reads the table from the beginning on every request and ends when the client disconnects; it does not tail new inserts yet. A change stream / tailable cursor, or a `Sinks.Many` fed by the listener, is the natural next step.
 - The intake endpoint has no validation, idempotency key, or authentication; this is an architecture sample, not a hardened service.
 - Writes use `subscribe()` inside the listener because that method sits outside the request's reactive chain. A production version would model the whole flow as one pipeline (or hand off through a channel/queue) instead of subscribing at the edge.
 
