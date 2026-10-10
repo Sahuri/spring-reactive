@@ -2,6 +2,8 @@ package com.sahuri.thread.persistence;
 
 import lombok.Data;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.Transient;
+import org.springframework.data.domain.Persistable;
 import org.springframework.data.relational.core.mapping.Column;
 import org.springframework.data.relational.core.mapping.Table;
 
@@ -10,7 +12,7 @@ import java.time.LocalDateTime;
 
 @Table("Transaction")
 @Data
-public class Transaction {
+public class Transaction implements Persistable<String> {
     @Id
     @Column("Id")
     private String id;
@@ -29,6 +31,17 @@ public class Transaction {
     @Column("CreatedDate")
     private LocalDateTime createdDate;
 
+    /**
+     * Marks the entity as new. The primary key is assigned by the application (UUID), so Spring
+     * Data R2DBC would otherwise treat a populated id as an existing row and issue an UPDATE
+     * instead of an INSERT — this flag forces the INSERT.
+     */
+    @Transient
+    private boolean isNew = true;
 
+    @Override
+    public boolean isNew() {
+        return isNew;
+    }
 }
 
